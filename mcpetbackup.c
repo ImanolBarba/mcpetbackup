@@ -1,7 +1,27 @@
 #include <stdio.h>
+#include <getopt.h>
 
 #include "nbt.h"
 #include "chunk.h"
+
+enum paramIndex
+{
+    UNKNOWN = 0,
+    REGION,
+    SAVE,
+    LOAD,
+    NAME,
+    OWNER
+};
+
+static struct option longopts[] = {
+    { "regiondata", required_argument,            NULL,           REGION    },
+    { "save",       required_argument,            NULL,           SAVE      },
+    { "load",       required_argument,            NULL,           LOAD      },
+    { "name",       required_argument,            NULL,           NAME      },
+    { "owner",      required_argument,            NULL,           OWNER     },
+    { NULL,         0,                            NULL,           UNKNOWN   }
+};
 
 int savePetToFile(Tag* pet, const char* filename) {
     void* petData;
@@ -181,17 +201,69 @@ ssize_t insertPetIntoChunk(void** chunkData, Tag chunkRoot, Tag* entities, Tag p
     return chunkDataLength;
 }
 
+void printHelp() {
+    fprintf(stderr,"--regiondata ./industrial/world/region --save Iris.mcdata --name Iris\n");
+    fprintf(stderr,"--regiondata ./industrial/world/region --save Iris.mcdata --owner 32812f90-17ec-4f5a-8b7e-e500f17b1ba5\n");
+    fprintf(stderr,"--regiondata ./industrial/world/region --load Iris.mcdata\n");
+}
+
 int main(int argc, char** argv) {
-    // TODO argv
-    // --regiondata ./industrial/world/region --save Iris.mcdata --name Iris
-    // --regiondata ./industrial/world/region --save Iris.mcdata --owner 32812f90-17ec-4f5a-8b7e-e500f17b1ba5
-    // --regiondata ./industrial/world/region --load Iris.mcdata
-    
-    const char* regionFolder = "./industrial/world/region";
-    const char* petName = "Iris";
+    const char* regionFolder = NULL;
+    const char* file = NULL;
+    const char* petName = NULL;
+    const char* ownerUUID = NULL;
     int save = 0;
-    const char* outputFile = "Iris.mcdata";
-    const char* inputFile = "Iris.mcdata";
+    
+    int longIndex = UNKNOWN;
+    int c;
+
+    if(argc < 2) {
+        fprintf(stderr,"No options specified\n\n");
+        fprintf(stderr,"Examples:\n");
+        printHelp();
+        return 0;
+    }
+
+    while ((c = getopt_long(argc, argv, "r:s:l:n:o:h", longopts, &longIndex)) != -1)
+    {
+        if(c == 'h') {
+            printHelp();
+            return 0;
+        }
+        else if(c == REGION) {regionFolder = optarg;}
+        else if(c == SAVE) {save = 1;file = optarg;}
+        else if(c == LOAD) {file = optarg;}
+        else if(c == NAME) {petName = optarg;}
+        else if(c == OWNER) {ownerUUID = optarg;}
+        else {
+            fprintf(stderr,"Unrecognised argument: %s\n",optarg);
+            printHelp();
+            return 1;
+        }
+    }
+    if(optind != argc) {
+        fprintf(stderr,"Unrecognised argument: %s\n",argv[optind+1]);
+        printHelp();
+        return 1;
+    }
+
+    if(regionFolder == NULL) {
+        fprintf(stderr,"Region path not specified (--regionpath PATH_TO_REGION_FOLDER)\n");
+        printHelp();
+        return 2;
+    } else if(save && petName == NULL && ownerUUID == NULL) {
+        fprintf(stderr,"OwnerUUID and petName were unspecified (--owner UUID, --name PET_NAME)\n");
+        printHelp();
+        return 3;
+    } else if(!save && (petName != NULL || ownerUUID != NULL)) {
+        fprintf(stderr,"OwnerUUID and petName were unspecified (--owner UUID, --name PET_NAME)\n");
+        printHelp();
+        return 3;
+    } else if(file == NULL) {
+        fprintf(stderr,"Neither saving or loading a pet was requested (--save PATH_TO_FILE, --load PATH_TO_FILE)\n");
+        printHelp();
+        return 4;
+    }
 
     void *chunkData;
     ChunkID chunk = translateCoordsToChunk(800, 200, 3041);
@@ -205,45 +277,45 @@ int main(int argc, char** argv) {
     if(pos != chunkLen) {
         fprintf(stderr, "Didn't reach end of NBT file\n");
         free(chunkData);
-        return 1;
+        return 5;
     }
 
     Tag* entities;
     if(getEntitiesTag((TagCompound*)t.payload,&entities)) {
         fprintf(stderr, "Unable to find Entities tag\n");
         free(chunkData);
-        return 2;
+        return 6;
     }
     if(save) {    
         Tag* pet;
-        if(searchForPet(*entities,petName,NULL,&pet)) {
+        if(searchForPet(*entities,petName,ownerUUID,&pet)) {
             fprintf(stderr, "Unable to find pet named %s\n",petName);
             free(chunkData);
-            return 3;
+            return 7;
         }
-        if(savePetToFile(pet,outputFile)) {
-            fprintf(stderr, "Unable to save pet to file: %s\n",outputFile);
+        if(savePetToFile(pet,file)) {
+            fprintf(stderr, "Unable to save pet to file: %s\n",file);
             free(chunkData);
-            return 4;
+            return 8;
         }
     } else {
         Tag pet;
-        if(loadPetFromFile(&pet,inputFile)) {
-            fprintf(stderr, "Unable to load pet from file: %s\n",inputFile);
+        if(loadPetFromFile(&pet,file)) {
+            fprintf(stderr, "Unable to load pet from file: %s\n",file);
             free(chunkData);
-            return 5;
+            return 9;
         }
         chunkLen = insertPetIntoChunk(&chunkData,t,entities,pet,801,200,3040);
         if(chunkLen <= 0) {
             fprintf(stderr, "Unable to insert pet into chunk\n");
             free(chunkData);
-            return 6;
+            return 10;
         }
         destroyTag(&pet);
         if(overwriteChunk(regionFolder, chunk, chunkData, chunkLen)) {
             fprintf(stderr, "Unable to write new chunk\n");
             free(chunkData);
-            return 7;
+            return 11;
         }
     }
 
