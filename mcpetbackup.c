@@ -1,12 +1,16 @@
 #include <stdio.h>
 #include <getopt.h>
 #include <dirent.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <stdint.h>
 
 #include "nbt.h"
 #include "chunk.h"
 
-enum paramIndex
-{
+enum paramIndex {
     UNKNOWN = 0,
     HELP,
     REGION,
@@ -36,13 +40,17 @@ static struct option longopts[] = {
 
 int savePetToFile(Tag* pet, const char* filename) {
     void* petData;
-    size_t petDataLength = composeTag(*pet, &petData);
+    ssize_t petDataLength = composeTag(*pet, &petData);
+    if(petDataLength < 0) {
+        fprintf(stderr,"Error while composing pet tag: code %d\n",(int)petDataLength);
+        return petDataLength;
+    }
     
     int fd = open(filename,O_CREAT|O_WRONLY,0644);
     if(fd == -1) {
         fprintf(stderr,"Unable to open file to save pet: %s\n",strerror(errno));
         free(petData);
-        return 1;
+        return -1;
     }
     ssize_t nWritten = 0;
     size_t totalWritten = 0;
@@ -55,7 +63,7 @@ int savePetToFile(Tag* pet, const char* filename) {
             fprintf(stderr,"Unable to write pet data: %s\n",strerror(errno));
             close(fd);
             free(petData);
-            return 2;
+            return -2;
         }
         totalWritten += nWritten;
     }
@@ -69,14 +77,14 @@ int loadPetFromFile(Tag* pet, const char* filename) {
     int fd = open(filename,O_RDONLY);
     if(fd == -1) {
         fprintf(stderr,"Unable to open file to load pet: %s\n",strerror(errno));
-        return 1;
+        return -1;
     }
 
     struct stat sb;
     if(stat(filename,&sb) == -1) {
         fprintf(stderr,"Unable to stat() file to load pet: %s\n",strerror(errno));
         close(fd);
-        return 2;
+        return -2;
     }
     void* petData = calloc(sb.st_size,sizeof(uint8_t));
 
@@ -91,17 +99,22 @@ int loadPetFromFile(Tag* pet, const char* filename) {
             fprintf(stderr,"Unable to write pet data: %s\n",strerror(errno));
             close(fd);
             free(petData);
-            return 3;
+            return -3;
         }
         totalRead += nRead;
     }
     close(fd);
 
-    size_t pos = parseTag(petData,pet);
-    if(pos != sb.st_size) {
-        fprintf(stderr,"Error parsing pet data\n");
+    ssize_t pos = parseTag(petData,pet);
+    if(pos < 0) {
+        fprintf(stderr,"Error parsing pet data: code %d\n",(int)pos);
         free(petData);
-        return 4;
+        return pos;
+    }
+    if(pos != sb.st_size) {
+        fprintf(stderr,"Didn't reach end of database while parsing\n");
+        free(petData);
+        return -4;
     }
 
     free(petData);
@@ -120,7 +133,7 @@ int getEntitiesTag(TagCompound* chunkRoot,Tag** entities) {
     }
     if(!found) {
         fprintf(stderr,"Unable to locate Level tag\n");
-        return 1;
+        return -1;
     }
     found = 0;
     
@@ -135,7 +148,7 @@ int getEntitiesTag(TagCompound* chunkRoot,Tag** entities) {
     }
     if(!found) {
         fprintf(stderr,"Unable to locate Entities tag\n");
-        return 2;
+        return -2;
     }
     *entities = t;
     return 0;
@@ -188,22 +201,35 @@ ssize_t insertPetIntoChunk(void** chunkData, Tag chunkRoot, Tag* entities, Tag p
     Tag* newPet = &entitiesList->list[(entitiesList->size) - 1];
     
     void* rawPetData;
-    size_t rawPetDataLength = composeTag(pet,&rawPetData);
-    size_t parsePos = parseTag(rawPetData,newPet);
+    ssize_t rawPetDataLength = composeTag(pet,&rawPetData);
+    if(rawPetDataLength < 0) {
+        fprintf(stderr,"Error while composing pet tag: code %d\n",(int)rawPetDataLength);
+        return -2;
+    }
+    ssize_t parsePos = parseTag(rawPetData,newPet);
+    if(parsePos < 0) {
+        fprintf(stderr,"Error while parsing pet tag: code %d\n",(int)parsePos);
+        free(rawPetData);
+        return -3;
+    }
     if(parsePos != rawPetDataLength) {
         fprintf(stderr,"Error while duplicating pet. New pet data does not match original\n");
         free(rawPetData);
-        return -2;
+        return -4;
     }
     free(rawPetData);
 
     void* newChunkData;
-    size_t chunkDataLength = composeTag(chunkRoot, &newChunkData);
+    ssize_t chunkDataLength = composeTag(chunkRoot, &newChunkData);
+    if(chunkDataLength < 0) {
+        fprintf(stderr,"Error while composing new chunk tag: code %d\n",(int)chunkDataLength);
+        return -5;
+    }
     newptr = realloc(*chunkData,chunkDataLength);
     if(newptr == NULL) {
         fprintf(stderr,"Unable to realloc chunkData to fit new data\n");
         free(newChunkData);
-        return -4;
+        return -6;
     }
     *chunkData = newptr;
     memcpy(*chunkData,newChunkData,chunkDataLength);
@@ -250,7 +276,7 @@ int main(int argc, char** argv) {
         fprintf(stderr,"No options specified\n\n");
         fprintf(stderr,"Examples:\n");
         printHelp();
-        return 0;
+        return 3;
     }
 
     while ((c = getopt_long(argc, argv, "r:s:l:n:o:c:h", longopts, &longIndex)) != -1)
@@ -265,19 +291,19 @@ int main(int argc, char** argv) {
         else {
             fprintf(stderr,"Unrecognised argument: %s\n",optarg);
             printHelp();
-            return 1;
+            return 3;
         }
     }
     if(optind != argc) {
         fprintf(stderr,"Unrecognised argument: %s\n",argv[optind+1]);
         printHelp();
-        return 1;
+        return 3;
     }
 
     if(regionFolder == NULL) {
         fprintf(stderr,"Region path not specified (--regionpath PATH_TO_REGION_FOLDER)\n");
         printHelp();
-        return 2;
+        return 3;
     } else if(!load && (petName == NULL && ownerUUID == NULL)) {
         fprintf(stderr,"OwnerUUID and petName were unspecified (--owner UUID, --name PET_NAME)\n");
         printHelp();
@@ -289,7 +315,7 @@ int main(int argc, char** argv) {
     } else if(save && coords == NULL) {
         fprintf(stderr,"Coordinates were not specified\n");
         printHelp();
-        return 4;
+        return 3;
     } 
 
     if(!load) {
@@ -298,7 +324,7 @@ int main(int argc, char** argv) {
 
         if((dirp = opendir(regionFolder)) == NULL) {
             fprintf(stderr,"Unable to open region folder '%s'\n",regionFolder);
-            return 1;
+            return 2;
         }
 
         do {
@@ -326,16 +352,22 @@ int main(int argc, char** argv) {
                             (chunk.z + 1) * BLOCKS_PER_CHUNK
                         );
                         ssize_t chunkLen = loadChunk(regionFolder, chunk, &chunkData);
-                        if(chunkLen < 0) {
-                            fprintf(stderr, "Unable to load chunk\n");
-                            return 5;
+                        if(chunkLen == CHUNK_NOT_PRESENT) {
+                            continue;
+                        } else if(chunkLen < 0) {
+                            fprintf(stderr, "Unable to load chunk: code %d\n",(int)chunkLen);
+                            return 2;
                         } else if(chunkLen != 0) {
                             Tag t;
-                            unsigned int pos = parseTag(chunkData,&t);
+                            ssize_t pos = parseTag(chunkData,&t);
+                            if(pos < 0) {
+                                fprintf(stderr, "Error parsing chunk root tag: code %d\n",(int)pos);
+                                return 2;
+                            }
                             if(pos != chunkLen) {
                                 fprintf(stderr, "Didn't reach end of NBT file\n");
                                 free(chunkData);
-                                return 5;
+                                return 2;
                             }
 
                             Tag* entities;
@@ -343,7 +375,7 @@ int main(int argc, char** argv) {
                                 fprintf(stderr, "Unable to find Entities tag\n");
                                 free(chunkData);
                                 destroyTag(&t);
-                                return 6;
+                                return 2;
                             }
                             Tag* pet;
                             if(searchForPet(*entities,petName,ownerUUID,&pet) == 0) {
@@ -354,7 +386,7 @@ int main(int argc, char** argv) {
                                         fprintf(stderr, "Unable to save pet to file: %s\n",file);
                                         free(chunkData);
                                         closedir(dirp);
-                                        return 8;
+                                        return 2;
                                     }
                                 }
                                 destroyTag(&t);
@@ -376,55 +408,64 @@ int main(int argc, char** argv) {
         Coords location;
         if(sscanf(coords,"%d,%d,%d",&location.x,&location.y,&location.z) != 3) {
             fprintf(stderr, "Unable to parse coordinates, please specify coordinates correctly (--coords X,Y,Z)\n");
-            return 5;
+            return 3;
         }
 
         void *chunkData;
         ChunkID chunk = translateCoordsToChunk(location.x, location.y, location.z);
         ssize_t chunkLen = loadChunk(regionFolder, chunk, &chunkData);
-        if(chunkLen <= 0) {
-            fprintf(stderr, "Unable to load chunk\n");
-            return 5;
+        if(chunkLen == CHUNK_NOT_PRESENT) {
+            fprintf(stderr, "Tried to spawn pet in a chunk that has not been generated!\n");
+            return 2;
+        } else if(chunkLen < 0) {
+            fprintf(stderr, "Unable to load chunk: code %d\n",(int)chunkLen);
+            return 2;
         }
+        if(chunkLen != 0) {
+             Tag t;
+            ssize_t pos = parseTag(chunkData,&t);
+            if(pos < 0) {
+                fprintf(stderr, "Error parsing chunk root tag: code %d\n",(int)pos);
+                return 2;
+            }
+            if(pos != chunkLen) {
+                fprintf(stderr, "Didn't reach end of NBT file\n");
+                free(chunkData);
+                return 2;
+            }
 
-        Tag t;
-        unsigned int pos = parseTag(chunkData,&t);
-        if(pos != chunkLen) {
-            fprintf(stderr, "Didn't reach end of NBT file\n");
-            free(chunkData);
-            return 5;
-        }
-
-        Tag* entities;
-        if(getEntitiesTag((TagCompound*)t.payload,&entities)) {
-            fprintf(stderr, "Unable to find Entities tag\n");
-            free(chunkData);
+            Tag* entities;
+            if(getEntitiesTag((TagCompound*)t.payload,&entities)) {
+                fprintf(stderr, "Unable to find Entities tag\n");
+                free(chunkData);
+                destroyTag(&t);
+                return 2;
+            }
+            Tag pet;
+            if(loadPetFromFile(&pet,file)) {
+                fprintf(stderr, "Unable to load pet from file: %s\n",file);
+                free(chunkData);
+                destroyTag(&t);
+                return 2;
+            }
+            chunkLen = insertPetIntoChunk(&chunkData,t,entities,pet,location.x,location.y,location.z);
+            if(chunkLen <= 0) {
+                fprintf(stderr, "Unable to insert pet into chunk\n");
+                free(chunkData);
+                destroyTag(&t);
+                return 2;
+            }
+            destroyTag(&pet);
+            int res = overwriteChunk(regionFolder, chunk, chunkData, chunkLen);
+            if(res) {
+                fprintf(stderr, "Unable to write new chunk: code %d\n",res);
+                free(chunkData);
+                destroyTag(&t);
+                return 2;
+            }
             destroyTag(&t);
-            return 6;
-        }
-        Tag pet;
-        if(loadPetFromFile(&pet,file)) {
-            fprintf(stderr, "Unable to load pet from file: %s\n",file);
             free(chunkData);
-            destroyTag(&t);
-            return 9;
         }
-        chunkLen = insertPetIntoChunk(&chunkData,t,entities,pet,location.x,location.y,location.z);
-        if(chunkLen <= 0) {
-            fprintf(stderr, "Unable to insert pet into chunk\n");
-            free(chunkData);
-            destroyTag(&t);
-            return 10;
-        }
-        destroyTag(&pet);
-        if(overwriteChunk(regionFolder, chunk, chunkData, chunkLen)) {
-            fprintf(stderr, "Unable to write new chunk\n");
-            free(chunkData);
-            destroyTag(&t);
-            return 11;
-        }
-        destroyTag(&t);
-        free(chunkData);
     }
     return 0;
 }
